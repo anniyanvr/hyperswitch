@@ -4,46 +4,92 @@
     clippy::unwrap_in_result,
     clippy::unwrap_used
 )]
+use test_utils::connector_auth;
 
 mod aci;
 mod adyen;
-mod adyen_uk_ui;
+mod adyenplatform;
 mod airwallex;
+mod amazonpay;
 mod authorizedotnet;
 mod bambora;
+mod bamboraapac;
+#[cfg(feature = "dummy_connector")]
+mod bankofamerica;
+#[cfg(feature = "dummy_connector")]
+mod billwerk;
 mod bitpay;
 mod bluesnap;
+mod boku;
+mod cashtocode;
 mod checkout;
 mod coinbase;
-mod connector_auth;
+mod cryptopay;
 mod cybersource;
+mod datatrans;
+mod deutschebank;
 mod dlocal;
 #[cfg(feature = "dummy_connector")]
 mod dummyconnector;
+mod ebanx;
+mod elavon;
 mod fiserv;
+mod fiservemea;
+mod fiuu;
 mod forte;
 mod globalpay;
+mod globepay;
+mod gocardless;
+mod gpayments;
+mod helcim;
 mod iatapay;
+mod inespay;
+mod itaubank;
+mod jpmorgan;
+mod mifinity;
 mod mollie;
 mod multisafepay;
+mod netcetera;
 mod nexinets;
+mod nexixpay;
 mod nmi;
+mod nomupay;
 mod noon;
+mod novalnet;
 mod nuvei;
-mod nuvei_ui;
+#[cfg(feature = "dummy_connector")]
+mod opayo;
 mod opennode;
+mod paybox;
+#[cfg(feature = "dummy_connector")]
 mod payeezy;
+mod payme;
+mod payone;
 mod paypal;
 mod payu;
-mod payu_ui;
+mod placetopay;
+mod plaid;
+mod powertranz;
+#[cfg(feature = "dummy_connector")]
+mod prophetpay;
 mod rapyd;
-mod selenium;
+mod razorpay;
+mod redsys;
 mod shift4;
+mod square;
+mod stax;
 mod stripe;
-mod stripe_ui;
+mod taxjar;
 mod trustpay;
+mod tsys;
+mod unified_authentication_service;
 mod utils;
+mod volt;
+mod wellsfargo;
+// mod wellsfargopayout;
+#[cfg(feature = "payouts")]
+mod wise;
 mod worldline;
-mod worldline_ui;
 mod worldpay;
 mod zen;
+mod zsl;

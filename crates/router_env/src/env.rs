@@ -147,13 +147,14 @@ macro_rules! commit {
 //     };
 // }
 
-/// Service name deduced from name of the crate.
+/// Service name deduced from name of the binary.
+/// This macro must be called within binaries only.
 ///
 /// Example: `router`.
 #[macro_export]
 macro_rules! service_name {
     () => {
-        env!("CARGO_CRATE_NAME")
+        env!("CARGO_BIN_NAME")
     };
 }
 
@@ -164,5 +165,15 @@ macro_rules! service_name {
 macro_rules! profile {
     () => {
         env!("CARGO_PROFILE")
+    };
+}
+
+/// The latest git tag. If tags are not present in the repository, the short commit hash is used
+/// instead. Refer to the [`git describe`](https://git-scm.com/docs/git-describe) documentation for
+/// more details.
+#[macro_export]
+macro_rules! git_tag {
+    () => {
+        env!("VERGEN_GIT_DESCRIBE")
     };
 }

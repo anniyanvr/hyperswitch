@@ -1,11 +1,9 @@
 use std::str::FromStr;
 
 use common_utils::pii::Email;
+use hyperswitch_domain_models::address::{Address, AddressDetails, PhoneDetails};
 use masking::Secret;
-use router::types::{
-    self, api,
-    storage::{self, enums},
-};
+use router::types::{self, api, domain, storage::enums};
 
 use crate::{
     connector_auth,
@@ -14,19 +12,21 @@ use crate::{
 struct Cybersource;
 impl ConnectorActions for Cybersource {}
 impl utils::Connector for Cybersource {
-    fn get_data(&self) -> types::api::ConnectorData {
+    fn get_data(&self) -> api::ConnectorData {
         use router::connector::Cybersource;
-        types::api::ConnectorData {
-            connector: Box::new(&Cybersource),
-            connector_name: types::Connector::Cybersource,
-            get_token: types::api::GetToken::Connector,
-        }
+        utils::construct_connector_data_old(
+            Box::new(Cybersource::new()),
+            types::Connector::Cybersource,
+            api::GetToken::Connector,
+            None,
+        )
     }
     fn get_auth_token(&self) -> types::ConnectorAuthType {
-        types::ConnectorAuthType::from(
+        utils::to_connector_auth_type(
             connector_auth::ConnectorAuthentication::new()
                 .cybersource
-                .expect("Missing connector authentication configuration"),
+                .expect("Missing connector authentication configuration")
+                .into(),
         )
     }
     fn get_name(&self) -> String {
@@ -36,9 +36,10 @@ impl utils::Connector for Cybersource {
 
 fn get_default_payment_info() -> Option<utils::PaymentInfo> {
     Some(utils::PaymentInfo {
-        address: Some(types::PaymentAddress {
-            billing: Some(api::Address {
-                address: Some(api::AddressDetails {
+        address: Some(types::PaymentAddress::new(
+            None,
+            Some(Address {
+                address: Some(AddressDetails {
                     first_name: Some(Secret::new("first".to_string())),
                     last_name: Some(Secret::new("last".to_string())),
                     line1: Some(Secret::new("line1".to_string())),
@@ -48,19 +49,21 @@ fn get_default_payment_info() -> Option<utils::PaymentInfo> {
                     country: Some(api_models::enums::CountryAlpha2::IN),
                     ..Default::default()
                 }),
-                phone: Some(api::PhoneDetails {
-                    number: Some(Secret::new("1234567890".to_string())),
+                phone: Some(PhoneDetails {
+                    number: Some(Secret::new("9123456789".to_string())),
                     country_code: Some("+91".to_string()),
                 }),
+                email: None,
             }),
-            ..Default::default()
-        }),
+            None,
+            None,
+        )),
         ..Default::default()
     })
 }
 fn get_default_payment_authorize_data() -> Option<types::PaymentsAuthorizeData> {
     Some(types::PaymentsAuthorizeData {
-        currency: storage::enums::Currency::USD,
+        currency: enums::Currency::USD,
         email: Some(Email::from_str("abc@gmail.com").unwrap()),
         ..PaymentAuthorizeType::default().0
     })
@@ -123,7 +126,7 @@ async fn should_sync_payment() {
         .psync_retry_till_status_matches(
             enums::AttemptStatus::Charged,
             Some(types::PaymentsSyncData {
-                connector_transaction_id: router::types::ResponseId::ConnectorTransactionId(
+                connector_transaction_id: types::ResponseId::ConnectorTransactionId(
                     "6699597903496176903954".to_string(),
                 ),
                 ..Default::default()
@@ -156,7 +159,7 @@ async fn should_fail_payment_for_invalid_exp_month() {
     let response = Cybersource {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_month: Secret::new("13".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -181,7 +184,7 @@ async fn should_fail_payment_for_invalid_exp_year() {
     let response = Cybersource {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
                     card_exp_year: Secret::new("2022".to_string()),
                     ..utils::CCardType::default().0
                 }),
@@ -199,8 +202,8 @@ async fn should_fail_payment_for_invalid_card_cvc() {
     let response = Cybersource {}
         .make_payment(
             Some(types::PaymentsAuthorizeData {
-                payment_method_data: types::api::PaymentMethodData::Card(api::Card {
-                    card_cvc: Secret::new("2131233213".to_string()),
+                payment_method_data: domain::PaymentMethodData::Card(domain::Card {
+                    card_cvc: Secret::new("9123456789".to_string()),
                     ..utils::CCardType::default().0
                 }),
                 ..get_default_payment_authorize_data().unwrap()
@@ -313,7 +316,7 @@ async fn should_partially_refund_succeeded_payment() {
 }
 
 #[actix_web::test]
-#[ignore = "refunds tests are ignored for this connector becuase it takes one day for a payment to be settled."]
+#[ignore = "refunds tests are ignored for this connector because it takes one day for a payment to be settled."]
 async fn should_partially_refund_manually_captured_payment() {
     let connector = Cybersource {};
     let response = connector
@@ -372,17 +375,17 @@ async fn should_sync_refund() {
 }
 
 #[actix_web::test]
-#[ignore = "refunds tests are ignored for this connector becuase it takes one day for a payment to be settled."]
+#[ignore = "refunds tests are ignored for this connector because it takes one day for a payment to be settled."]
 async fn should_sync_manually_captured_refund() {}
 
 #[actix_web::test]
-#[ignore = "refunds tests are ignored for this connector becuase it takes one day for a payment to be settled."]
+#[ignore = "refunds tests are ignored for this connector because it takes one day for a payment to be settled."]
 async fn should_refund_auto_captured_payment() {}
 
 #[actix_web::test]
-#[ignore = "refunds tests are ignored for this connector becuase it takes one day for a payment to be settled."]
+#[ignore = "refunds tests are ignored for this connector because it takes one day for a payment to be settled."]
 async fn should_refund_succeeded_payment_multiple_times() {}
 
 #[actix_web::test]
-#[ignore = "refunds tests are ignored for this connector becuase it takes one day for a payment to be settled."]
+#[ignore = "refunds tests are ignored for this connector because it takes one day for a payment to be settled."]
 async fn should_fail_for_refund_amount_higher_than_payment_amount() {}

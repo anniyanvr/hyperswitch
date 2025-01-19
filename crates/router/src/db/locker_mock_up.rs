@@ -1,4 +1,5 @@
-use error_stack::IntoReport;
+use error_stack::{report, ResultExt};
+use router_env::{instrument, tracing};
 
 use super::{MockDb, Store};
 use crate::{
@@ -27,6 +28,7 @@ pub trait LockerMockUpInterface {
 
 #[async_trait::async_trait]
 impl LockerMockUpInterface for Store {
+    #[instrument(skip_all)]
     async fn find_locker_by_card_id(
         &self,
         card_id: &str,
@@ -34,18 +36,21 @@ impl LockerMockUpInterface for Store {
         let conn = connection::pg_connection_read(self).await?;
         storage::LockerMockUp::find_by_card_id(&conn, card_id)
             .await
-            .map_err(Into::into)
-            .into_report()
+            .map_err(|error| report!(errors::StorageError::from(error)))
     }
 
+    #[instrument(skip_all)]
     async fn insert_locker_mock_up(
         &self,
         new: storage::LockerMockUpNew,
     ) -> CustomResult<storage::LockerMockUp, errors::StorageError> {
         let conn = connection::pg_connection_write(self).await?;
-        new.insert(&conn).await.map_err(Into::into).into_report()
+        new.insert(&conn)
+            .await
+            .map_err(|error| report!(errors::StorageError::from(error)))
     }
 
+    #[instrument(skip_all)]
     async fn delete_locker_mock_up(
         &self,
         card_id: &str,
@@ -53,8 +58,7 @@ impl LockerMockUpInterface for Store {
         let conn = connection::pg_connection_write(self).await?;
         storage::LockerMockUp::delete_by_card_id(&conn, card_id)
             .await
-            .map_err(Into::into)
-            .into_report()
+            .map_err(|error| report!(errors::StorageError::from(error)))
     }
 }
 
@@ -84,8 +88,8 @@ impl LockerMockUpInterface for MockDb {
         }
 
         let created_locker = storage::LockerMockUp {
-            #[allow(clippy::as_conversions)]
-            id: locked_lockers.len() as i32,
+            id: i32::try_from(locked_lockers.len())
+                .change_context(errors::StorageError::MockDbError)?,
             card_id: new.card_id,
             external_id: new.external_id,
             card_fingerprint: new.card_fingerprint,
@@ -100,6 +104,7 @@ impl LockerMockUpInterface for MockDb {
             duplicate: None,
             card_cvc: new.card_cvc,
             payment_method_id: new.payment_method_id,
+            enc_card_data: new.enc_card_data,
         };
 
         locked_lockers.push(created_locker.clone());
@@ -126,6 +131,8 @@ impl LockerMockUpInterface for MockDb {
 mod tests {
     #[allow(clippy::unwrap_used)]
     mod mockdb_locker_mock_up_interface {
+        use common_utils::{generate_customer_id_of_default_length, id_type};
+
         use crate::{
             db::{locker_mock_up::LockerMockUpInterface, MockDb},
             types::storage,
@@ -134,8 +141,8 @@ mod tests {
         pub struct LockerMockUpIds {
             card_id: String,
             external_id: String,
-            merchant_id: String,
-            customer_id: String,
+            merchant_id: id_type::MerchantId,
+            customer_id: id_type::CustomerId,
         }
 
         fn create_locker_mock_up_new(locker_ids: LockerMockUpIds) -> storage::LockerMockUpNew {
@@ -152,19 +159,24 @@ mod tests {
                 card_cvc: Some("123".into()),
                 payment_method_id: Some("payment_method_id".into()),
                 customer_id: Some(locker_ids.customer_id),
+                nickname: Some("card_holder_nickname".into()),
+                enc_card_data: Some("enc_card_data".into()),
             }
         }
 
         #[tokio::test]
         async fn find_locker_by_card_id() {
-            let mockdb = MockDb::new(&Default::default()).await;
+            #[allow(clippy::expect_used)]
+            let mockdb = MockDb::new(&redis_interface::RedisSettings::default())
+                .await
+                .expect("Failed to create Mock store");
 
             let created_locker = mockdb
                 .insert_locker_mock_up(create_locker_mock_up_new(LockerMockUpIds {
                     card_id: "card_1".into(),
                     external_id: "external_1".into(),
-                    merchant_id: "merchant_1".into(),
-                    customer_id: "customer_1".into(),
+                    merchant_id: id_type::MerchantId::default(),
+                    customer_id: generate_customer_id_of_default_length(),
                 }))
                 .await
                 .unwrap();
@@ -173,8 +185,8 @@ mod tests {
                 .insert_locker_mock_up(create_locker_mock_up_new(LockerMockUpIds {
                     card_id: "card_2".into(),
                     external_id: "external_1".into(),
-                    merchant_id: "merchant_1".into(),
-                    customer_id: "customer_1".into(),
+                    merchant_id: id_type::MerchantId::default(),
+                    customer_id: generate_customer_id_of_default_length(),
                 }))
                 .await;
 
@@ -185,14 +197,17 @@ mod tests {
 
         #[tokio::test]
         async fn insert_locker_mock_up() {
-            let mockdb = MockDb::new(&Default::default()).await;
+            #[allow(clippy::expect_used)]
+            let mockdb = MockDb::new(&redis_interface::RedisSettings::default())
+                .await
+                .expect("Failed to create Mock store");
 
             let created_locker = mockdb
                 .insert_locker_mock_up(create_locker_mock_up_new(LockerMockUpIds {
                     card_id: "card_1".into(),
                     external_id: "external_1".into(),
-                    merchant_id: "merchant_1".into(),
-                    customer_id: "customer_1".into(),
+                    merchant_id: id_type::MerchantId::default(),
+                    customer_id: generate_customer_id_of_default_length(),
                 }))
                 .await
                 .unwrap();
@@ -212,14 +227,17 @@ mod tests {
 
         #[tokio::test]
         async fn delete_locker_mock_up() {
-            let mockdb = MockDb::new(&Default::default()).await;
+            #[allow(clippy::expect_used)]
+            let mockdb = MockDb::new(&redis_interface::RedisSettings::default())
+                .await
+                .expect("Failed to create Mock store");
 
             let created_locker = mockdb
                 .insert_locker_mock_up(create_locker_mock_up_new(LockerMockUpIds {
                     card_id: "card_1".into(),
                     external_id: "external_1".into(),
-                    merchant_id: "merchant_1".into(),
-                    customer_id: "customer_1".into(),
+                    merchant_id: id_type::MerchantId::default(),
+                    customer_id: generate_customer_id_of_default_length(),
                 }))
                 .await
                 .unwrap();

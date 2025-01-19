@@ -1,10 +1,10 @@
-FROM rust:slim as builder
+FROM rust:bookworm as builder
 
-ARG RUN_ENV=sandbox
 ARG EXTRA_FEATURES=""
+ARG VERSION_FEATURE_SET="v1"
 
 RUN apt-get update \
-    && apt-get install -y libpq-dev libssl-dev pkg-config
+    && apt-get install -y libpq-dev libssl-dev pkg-config protobuf-compiler
 
 # Copying codebase from current dir to /router dir
 # and creating a fresh build
@@ -33,11 +33,16 @@ ENV RUST_BACKTRACE="short"
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse"
 
 COPY . .
-RUN cargo build --release --features ${RUN_ENV} ${EXTRA_FEATURES}
+RUN cargo build \
+    --release \
+    --no-default-features \
+    --features release \
+    --features ${VERSION_FEATURE_SET} \
+    ${EXTRA_FEATURES}
 
 
 
-FROM debian
+FROM debian:bookworm
 
 # Placing config and binary executable in different directories
 ARG CONFIG_DIR=/local/config
@@ -62,7 +67,8 @@ ENV TZ=Etc/UTC \
     RUN_ENV=${RUN_ENV} \
     CONFIG_DIR=${CONFIG_DIR} \
     SCHEDULER_FLOW=${SCHEDULER_FLOW} \
-    BINARY=${BINARY}
+    BINARY=${BINARY} \
+    RUST_MIN_STACK=4194304
 
 RUN mkdir -p ${BIN_DIR}
 

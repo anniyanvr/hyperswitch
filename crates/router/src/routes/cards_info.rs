@@ -3,10 +3,11 @@ use router_env::{instrument, tracing, Flow};
 
 use super::app::AppState;
 use crate::{
-    core::cards_info,
+    core::{api_locking, cards_info},
     services::{api, authentication as auth},
 };
 
+#[cfg(feature = "v1")]
 /// Cards Info - Retrieve
 ///
 /// Retrieve the card information given the card bin
@@ -41,13 +42,16 @@ pub async fn card_iin_info(
         Err(e) => return api::log_and_return_error_response(e),
     };
 
-    api::server_wrap(
+    Box::pin(api::server_wrap(
         Flow::CardsInfo,
-        state.as_ref(),
+        state,
         &req,
         payload,
-        cards_info::retrieve_card_info,
+        |state, auth, req, _| {
+            cards_info::retrieve_card_info(state, auth.merchant_account, auth.key_store, req)
+        },
         &*auth,
-    )
+        api_locking::LockAction::NotApplicable,
+    ))
     .await
 }

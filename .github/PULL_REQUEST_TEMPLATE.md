@@ -19,7 +19,7 @@
 - [ ] This PR modifies the database schema
 - [ ] This PR modifies application configuration/environment variables
 
-<!-- 
+<!--
 Provide links to the files with corresponding changes.
 
 Following are the paths where you can find config files:
@@ -35,7 +35,7 @@ Why is this change required? What problem does it solve?
 If it fixes an open issue, please link to the issue here.
 
 If you don't have an issue, we'd recommend starting with one first so the PR
-can focus on the implementation (unless its an obvious bug or documentation fix
+can focus on the implementation (unless it is an obvious bug or documentation fix
 that will have little conversation).
 -->
 
@@ -52,6 +52,5 @@ Or did you test this change manually (provide relevant screenshots)?
 
 - [ ] I formatted the code `cargo +nightly fmt --all`
 - [ ] I addressed lints thrown by `cargo clippy`
-- [ ] I reviewed submitted code
+- [ ] I reviewed the submitted code
 - [ ] I added unit tests for my changes where possible
-- [ ] I added a [CHANGELOG](/CHANGELOG.md) entry if applicable

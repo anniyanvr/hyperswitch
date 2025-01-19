@@ -1,33 +1,54 @@
 mod result_codes;
-mod transformers;
-use std::fmt::Debug;
+pub mod transformers;
 
-use error_stack::{IntoReport, ResultExt};
+use common_utils::{
+    request::RequestContent,
+    types::{AmountConvertor, StringMajorUnit, StringMajorUnitForConnector},
+};
+use error_stack::{report, ResultExt};
+use hyperswitch_interfaces::api::ConnectorSpecifications;
+use masking::PeekInterface;
 use transformers as aci;
 
+use super::utils::{convert_amount, is_mandate_supported, PaymentsAuthorizeRequestData};
 use crate::{
     configs::settings,
+    connector::utils::PaymentMethodDataType,
     core::errors::{self, CustomResult},
+    events::connector_api_logs::ConnectorEvent,
     headers,
     services::{
         self,
         request::{self, Mask},
+        ConnectorValidation,
     },
     types::{
         self,
         api::{self, ConnectorCommon},
     },
-    utils::{self, BytesExt},
+    utils::BytesExt,
 };
 
-#[derive(Debug, Clone)]
-pub struct Aci;
+#[derive(Clone)]
+pub struct Aci {
+    amount_converter: &'static (dyn AmountConvertor<Output = StringMajorUnit> + Sync),
+}
+
+impl Aci {
+    pub fn new() -> &'static Self {
+        &Self {
+            amount_converter: &StringMajorUnitForConnector,
+        }
+    }
+}
 
 impl ConnectorCommon for Aci {
     fn id(&self) -> &'static str {
         "aci"
     }
-
+    fn get_currency_unit(&self) -> api::CurrencyUnit {
+        api::CurrencyUnit::Base
+    }
     fn common_get_content_type(&self) -> &'static str {
         "application/x-www-form-urlencoded"
     }
@@ -40,13 +61,55 @@ impl ConnectorCommon for Aci {
         &self,
         auth_type: &types::ConnectorAuthType,
     ) -> CustomResult<Vec<(String, request::Maskable<String>)>, errors::ConnectorError> {
-        let auth: aci::AciAuthType = auth_type
-            .try_into()
+        let auth = aci::AciAuthType::try_from(auth_type)
             .change_context(errors::ConnectorError::FailedToObtainAuthType)?;
         Ok(vec![(
             headers::AUTHORIZATION.to_string(),
             auth.api_key.into_masked(),
         )])
+    }
+
+    fn build_error_response(
+        &self,
+        res: types::Response,
+        event_builder: Option<&mut ConnectorEvent>,
+    ) -> CustomResult<types::ErrorResponse, errors::ConnectorError> {
+        let response: aci::AciErrorResponse = res
+            .response
+            .parse_struct("AciErrorResponse")
+            .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
+        event_builder.map(|i| i.set_error_response_body(&response));
+        router_env::logger::info!(connector_response=?response);
+        Ok(types::ErrorResponse {
+            status_code: res.status_code,
+            code: response.result.code,
+            message: response.result.description,
+            reason: response.result.parameter_errors.map(|errors| {
+                errors
+                    .into_iter()
+                    .map(|error_description| {
+                        format!(
+                            "Field is {} and the message is {}",
+                            error_description.name, error_description.message
+                        )
+                    })
+                    .collect::<Vec<String>>()
+                    .join("; ")
+            }),
+            attempt_status: None,
+            connector_transaction_id: None,
+        })
+    }
+}
+
+impl ConnectorValidation for Aci {
+    fn validate_mandate_payment(
+        &self,
+        pm_type: Option<types::storage::enums::PaymentMethodType>,
+        pm_data: types::domain::payments::PaymentMethodData,
+    ) -> CustomResult<(), errors::ConnectorError> {
+        let mandate_supported_pmd = std::collections::HashSet::from([PaymentMethodDataType::Card]);
+        is_mandate_supported(pm_data, pm_type, mandate_supported_pmd, self.id())
     }
 }
 
@@ -90,16 +153,27 @@ impl
     // Not Implemented (R)
 }
 
-impl api::PreVerify for Aci {}
+impl api::MandateSetup for Aci {}
 
 impl
     services::ConnectorIntegration<
-        api::Verify,
-        types::VerifyRequestData,
+        api::SetupMandate,
+        types::SetupMandateRequestData,
         types::PaymentsResponseData,
     > for Aci
 {
     // Issue: #173
+    fn build_request(
+        &self,
+        _req: &types::RouterData<
+            api::SetupMandate,
+            types::SetupMandateRequestData,
+            types::PaymentsResponseData,
+        >,
+        _connectors: &settings::Connectors,
+    ) -> CustomResult<Option<services::Request>, errors::ConnectorError> {
+        Err(errors::ConnectorError::NotImplemented("Setup Mandate flow for Aci".to_string()).into())
+    }
 }
 
 impl
@@ -151,7 +225,7 @@ impl
                 .get_connector_transaction_id()
                 .change_context(errors::ConnectorError::MissingConnectorTransactionID)?,
             "?entityId=",
-            auth.entity_id
+            auth.entity_id.peek()
         ))
     }
 
@@ -166,7 +240,6 @@ impl
                 .url(&types::PaymentsSyncType::get_url(self, req, connectors)?)
                 .attach_default_headers()
                 .headers(types::PaymentsSyncType::get_headers(self, req, connectors)?)
-                .body(types::PaymentsSyncType::get_request_body(self, req)?)
                 .build(),
         ))
     }
@@ -174,6 +247,7 @@ impl
     fn handle_response(
         &self,
         data: &types::PaymentsSyncRouterData,
+        event_builder: Option<&mut ConnectorEvent>,
         res: types::Response,
     ) -> CustomResult<types::PaymentsSyncRouterData, errors::ConnectorError>
     where
@@ -184,6 +258,8 @@ impl
             res.response
                 .parse_struct("AciPaymentsResponse")
                 .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
+        event_builder.map(|i| i.set_response_body(&response));
+        router_env::logger::info!(connector_response=?response);
         types::RouterData::try_from(types::ResponseRouterData {
             response,
             data: data.clone(),
@@ -195,24 +271,9 @@ impl
     fn get_error_response(
         &self,
         res: types::Response,
+        event_builder: Option<&mut ConnectorEvent>,
     ) -> CustomResult<types::ErrorResponse, errors::ConnectorError> {
-        let response: aci::AciPaymentsResponse =
-            res.response
-                .parse_struct("AciPaymentsResponse")
-                .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
-        Ok(types::ErrorResponse {
-            code: response.result.code,
-            message: response.result.description,
-            reason: response.result.parameter_errors.and_then(|errors| {
-                errors.first().map(|error_description| {
-                    format!(
-                        "Field is {} and the message is {}",
-                        error_description.name, error_description.message
-                    )
-                })
-            }),
-            status_code: res.status_code,
-        })
+        self.build_error_response(res, event_builder)
     }
 }
 
@@ -245,20 +306,36 @@ impl
 
     fn get_url(
         &self,
-        _req: &types::PaymentsAuthorizeRouterData,
+        req: &types::PaymentsAuthorizeRouterData,
         connectors: &settings::Connectors,
     ) -> CustomResult<String, errors::ConnectorError> {
-        Ok(format!("{}{}", self.base_url(connectors), "v1/payments"))
+        match req.request.connector_mandate_id() {
+            Some(mandate_id) => Ok(format!(
+                "{}v1/registrations/{}/payments",
+                self.base_url(connectors),
+                mandate_id
+            )),
+            _ => Ok(format!("{}{}", self.base_url(connectors), "v1/payments")),
+        }
     }
 
     fn get_request_body(
         &self,
         req: &types::PaymentsAuthorizeRouterData,
-    ) -> CustomResult<Option<String>, errors::ConnectorError> {
+        _connectors: &settings::Connectors,
+    ) -> CustomResult<RequestContent, errors::ConnectorError> {
         // encode only for for urlencoded things.
-        let aci_req = utils::Encode::<aci::AciPaymentsRequest>::convert_and_url_encode(req)
-            .change_context(errors::ConnectorError::RequestEncodingFailed)?;
-        Ok(Some(aci_req))
+
+        let amount = convert_amount(
+            self.amount_converter,
+            req.request.minor_amount,
+            req.request.currency,
+        )?;
+
+        let connector_router_data = aci::AciRouterData::from((amount, req));
+        let connector_req = aci::AciPaymentsRequest::try_from(&connector_router_data)?;
+
+        Ok(RequestContent::FormUrlEncoded(Box::new(connector_req)))
     }
 
     fn build_request(
@@ -280,7 +357,9 @@ impl
                 .headers(types::PaymentsAuthorizeType::get_headers(
                     self, req, connectors,
                 )?)
-                .body(types::PaymentsAuthorizeType::get_request_body(self, req)?)
+                .set_body(types::PaymentsAuthorizeType::get_request_body(
+                    self, req, connectors,
+                )?)
                 .build(),
         ))
     }
@@ -288,12 +367,15 @@ impl
     fn handle_response(
         &self,
         data: &types::PaymentsAuthorizeRouterData,
+        event_builder: Option<&mut ConnectorEvent>,
         res: types::Response,
     ) -> CustomResult<types::PaymentsAuthorizeRouterData, errors::ConnectorError> {
         let response: aci::AciPaymentsResponse =
             res.response
                 .parse_struct("AciPaymentsResponse")
                 .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
+        event_builder.map(|i| i.set_response_body(&response));
+        router_env::logger::info!(connector_response=?response);
         types::RouterData::try_from(types::ResponseRouterData {
             response,
             data: data.clone(),
@@ -305,24 +387,9 @@ impl
     fn get_error_response(
         &self,
         res: types::Response,
+        event_builder: Option<&mut ConnectorEvent>,
     ) -> CustomResult<types::ErrorResponse, errors::ConnectorError> {
-        let response: aci::AciPaymentsResponse =
-            res.response
-                .parse_struct("AciPaymentsResponse")
-                .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
-        Ok(types::ErrorResponse {
-            status_code: res.status_code,
-            code: response.result.code,
-            message: response.result.description,
-            reason: response.result.parameter_errors.and_then(|errors| {
-                errors.first().map(|error_description| {
-                    format!(
-                        "Field is {} and the message is {}",
-                        error_description.name, error_description.message
-                    )
-                })
-            }),
-        })
+        self.build_error_response(res, event_builder)
     }
 }
 
@@ -365,10 +432,10 @@ impl
     fn get_request_body(
         &self,
         req: &types::PaymentsCancelRouterData,
-    ) -> CustomResult<Option<String>, errors::ConnectorError> {
-        let aci_req = utils::Encode::<aci::AciCancelRequest>::convert_and_url_encode(req)
-            .change_context(errors::ConnectorError::RequestEncodingFailed)?;
-        Ok(Some(aci_req))
+        _connectors: &settings::Connectors,
+    ) -> CustomResult<RequestContent, errors::ConnectorError> {
+        let connector_req = aci::AciCancelRequest::try_from(req)?;
+        Ok(RequestContent::FormUrlEncoded(Box::new(connector_req)))
     }
     fn build_request(
         &self,
@@ -381,7 +448,9 @@ impl
                 .url(&types::PaymentsVoidType::get_url(self, req, connectors)?)
                 .attach_default_headers()
                 .headers(types::PaymentsVoidType::get_headers(self, req, connectors)?)
-                .body(types::PaymentsVoidType::get_request_body(self, req)?)
+                .set_body(types::PaymentsVoidType::get_request_body(
+                    self, req, connectors,
+                )?)
                 .build(),
         ))
     }
@@ -389,12 +458,15 @@ impl
     fn handle_response(
         &self,
         data: &types::PaymentsCancelRouterData,
+        event_builder: Option<&mut ConnectorEvent>,
         res: types::Response,
     ) -> CustomResult<types::PaymentsCancelRouterData, errors::ConnectorError> {
         let response: aci::AciPaymentsResponse =
             res.response
                 .parse_struct("AciPaymentsResponse")
                 .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
+        event_builder.map(|i| i.set_response_body(&response));
+        router_env::logger::info!(connector_response=?response);
         types::RouterData::try_from(types::ResponseRouterData {
             response,
             data: data.clone(),
@@ -406,24 +478,9 @@ impl
     fn get_error_response(
         &self,
         res: types::Response,
+        event_builder: Option<&mut ConnectorEvent>,
     ) -> CustomResult<types::ErrorResponse, errors::ConnectorError> {
-        let response: aci::AciPaymentsResponse =
-            res.response
-                .parse_struct("AciPaymentsResponse")
-                .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
-        Ok(types::ErrorResponse {
-            status_code: res.status_code,
-            code: response.result.code,
-            message: response.result.description,
-            reason: response.result.parameter_errors.and_then(|errors| {
-                errors.first().map(|error_description| {
-                    format!(
-                        "Field is {} and the message is {}",
-                        error_description.name, error_description.message
-                    )
-                })
-            }),
-        })
+        self.build_error_response(res, event_builder)
     }
 }
 
@@ -470,10 +527,17 @@ impl services::ConnectorIntegration<api::Execute, types::RefundsData, types::Ref
     fn get_request_body(
         &self,
         req: &types::RefundsRouterData<api::Execute>,
-    ) -> CustomResult<Option<String>, errors::ConnectorError> {
-        let body = utils::Encode::<aci::AciRefundRequest>::convert_and_url_encode(req)
-            .change_context(errors::ConnectorError::RequestEncodingFailed)?;
-        Ok(Some(body))
+        _connectors: &settings::Connectors,
+    ) -> CustomResult<RequestContent, errors::ConnectorError> {
+        let amount = convert_amount(
+            self.amount_converter,
+            req.request.minor_refund_amount,
+            req.request.currency,
+        )?;
+
+        let connector_router_data = aci::AciRouterData::from((amount, req));
+        let connector_req = aci::AciRefundRequest::try_from(&connector_router_data)?;
+        Ok(RequestContent::FormUrlEncoded(Box::new(connector_req)))
     }
 
     fn build_request(
@@ -489,7 +553,9 @@ impl services::ConnectorIntegration<api::Execute, types::RefundsData, types::Ref
                 .headers(types::RefundExecuteType::get_headers(
                     self, req, connectors,
                 )?)
-                .body(types::RefundExecuteType::get_request_body(self, req)?)
+                .set_body(types::RefundExecuteType::get_request_body(
+                    self, req, connectors,
+                )?)
                 .build(),
         ))
     }
@@ -497,12 +563,16 @@ impl services::ConnectorIntegration<api::Execute, types::RefundsData, types::Ref
     fn handle_response(
         &self,
         data: &types::RefundsRouterData<api::Execute>,
+        event_builder: Option<&mut ConnectorEvent>,
         res: types::Response,
     ) -> CustomResult<types::RefundsRouterData<api::Execute>, errors::ConnectorError> {
         let response: aci::AciRefundResponse = res
             .response
             .parse_struct("AciRefundResponse")
             .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
+
+        event_builder.map(|i| i.set_response_body(&response));
+        router_env::logger::info!(connector_response=?response);
         types::RouterData::try_from(types::ResponseRouterData {
             response,
             data: data.clone(),
@@ -513,24 +583,9 @@ impl services::ConnectorIntegration<api::Execute, types::RefundsData, types::Ref
     fn get_error_response(
         &self,
         res: types::Response,
+        event_builder: Option<&mut ConnectorEvent>,
     ) -> CustomResult<types::ErrorResponse, errors::ConnectorError> {
-        let response: aci::AciRefundResponse = res
-            .response
-            .parse_struct("AciRefundResponse")
-            .change_context(errors::ConnectorError::ResponseDeserializationFailed)?;
-        Ok(types::ErrorResponse {
-            status_code: res.status_code,
-            code: response.result.code,
-            message: response.result.description,
-            reason: response.result.parameter_errors.and_then(|errors| {
-                errors.first().map(|error_description| {
-                    format!(
-                        "Field is {} and the message is {}",
-                        error_description.name, error_description.message
-                    )
-                })
-            }),
-        })
+        self.build_error_response(res, event_builder)
     }
 }
 
@@ -545,7 +600,7 @@ impl api::IncomingWebhook for Aci {
         &self,
         _request: &api::IncomingWebhookRequestDetails<'_>,
     ) -> CustomResult<api_models::webhooks::ObjectReferenceId, errors::ConnectorError> {
-        Err(errors::ConnectorError::WebhooksNotImplemented).into_report()
+        Err(report!(errors::ConnectorError::WebhooksNotImplemented))
     }
 
     fn get_webhook_event_type(
@@ -558,7 +613,9 @@ impl api::IncomingWebhook for Aci {
     fn get_webhook_resource_object(
         &self,
         _request: &api::IncomingWebhookRequestDetails<'_>,
-    ) -> CustomResult<serde_json::Value, errors::ConnectorError> {
-        Err(errors::ConnectorError::WebhooksNotImplemented).into_report()
+    ) -> CustomResult<Box<dyn masking::ErasedMaskSerialize>, errors::ConnectorError> {
+        Err(report!(errors::ConnectorError::WebhooksNotImplemented))
     }
 }
+
+impl ConnectorSpecifications for Aci {}

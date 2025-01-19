@@ -4,13 +4,10 @@ use std::ops::Deref;
 use common_utils::{date_time, errors};
 use error_stack::report;
 use masking::{PeekInterface, StrongSecret};
-use serde::{
-    de::{self},
-    Deserialize, Serialize,
-};
+use serde::{de, Deserialize, Serialize};
 use time::{util::days_in_year_month, Date, Duration, PrimitiveDateTime, Time};
 
-pub use crate::validate::{CCValError, CardNumber, CardNumberStrategy};
+pub use crate::validate::{CardNumber, CardNumberStrategy, CardNumberValidationErr};
 
 #[derive(Serialize)]
 pub struct CardSecurityCode(StrongSecret<u16>);
@@ -18,7 +15,7 @@ pub struct CardSecurityCode(StrongSecret<u16>);
 impl TryFrom<u16> for CardSecurityCode {
     type Error = error_stack::Report<errors::ValidationError>;
     fn try_from(csc: u16) -> Result<Self, Self::Error> {
-        if (100..=9999).contains(&csc) {
+        if (0..=9999).contains(&csc) {
             Ok(Self(StrongSecret::new(csc)))
         } else {
             Err(report!(errors::ValidationError::InvalidValue {
